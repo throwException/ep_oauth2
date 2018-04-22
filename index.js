@@ -104,7 +104,15 @@ exports.authenticate = function(hook_name, context) {
   if (context.req.url.indexOf('/auth/') === 0) return context.next();
   console.info('oauth2-authenticate from ->', context.req.url);
   context.req.session.afterAuthUrl = context.req.url;
-  return passport.authenticate('hbp')(context.req, context.res, context.next);
+  return passport.authenticate('session')(context.req, context.res, function(req, res) {
+    if (context.req.session.user) {
+      console.info("authenticated by session");
+      context.next();
+    } else {
+      console.info("authenticating by oauth2");
+      return passport.authenticate('hbp')(context.req, context.res, context.next);
+    }
+  });
 }
 
 exports.handleMessage = function(hook_name, context, cb) {
