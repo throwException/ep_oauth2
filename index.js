@@ -107,7 +107,10 @@ exports.authenticate = function(hook_name, context) {
   return passport.authenticate('session')(context.req, context.res, function(req, res) {
     if (context.req.session.user) {
       console.info("authenticated by session");
-      context.next();
+      var displayName = context.req.session.user[usernameKey];
+      console.info('user is', displayName);
+      setUsername(context.message.token, displayName);
+      return context.next();
     } else {
       console.info("authenticating by oauth2");
       return passport.authenticate('hbp')(context.req, context.res, context.next);
