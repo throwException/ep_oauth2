@@ -1,6 +1,7 @@
 var ERR = require('async-stacktrace');
 var settings = require('ep_etherpad-lite/node/utils/Settings');
 var authorManager = require('ep_etherpad-lite/node/db/AuthorManager');
+var userManager = require('./UserManager');
 var request = require('request');
 
 // var settings = require('ep_etherpad-lite/node/utils/Settings').ep_oauth2;
@@ -28,6 +29,15 @@ passport.deserializeUser(function(user, done) {
   done(null, user);
 });
 
+function initializeAuthAuthorState(username, authorId, authorName) {
+  return {
+    'id': authorId,
+    'username': username,
+    'shouldOverrideClient': authorId !== null,
+    'state': 'INIT',
+    'authorName': authorName
+  }   
+}
 
 function setUsername(token, username) {
   console.debug('oauth2.setUsername: getting authorid for token %s', token);
@@ -69,13 +79,13 @@ exports.expressConfigure = function(hook_name, context) {
         accessToken: accessToken,
         refreshToken: refreshToken
       };
-      authorManager.createAuthorIfNotExistsFor(data[idKey], data[usernameKey], function(err, authorId) {
-        if (err) {
-          return cb(err);
-        }
-        data.authorId = authorId;
-        return cb(null, data);
-      });
+
+      var username = data[idKey]
+      var displayName = data[usernameKey];
+      console.info('setting', username, displayName);
+      userManager.setDisplay4Username(displayName, username);
+      console.info('setting done');
+      cb(null, data);
     });
   }));
   var app = context.app;
@@ -106,13 +116,20 @@ exports.authenticate = function(hook_name, context) {
   context.req.session.afterAuthUrl = context.req.url;
   return passport.authenticate('session')(context.req, context.res, function(req, res) {
     if (context.req.session.user) {
-      console.info("authenticated by session");
-      var displayName = context.req.session.user[usernameKey];
-      console.info('user is', displayName);
-      setUsername(context.message.token, displayName);
-      return context.next();
+      var username = context.req.session.user[idKey];
+      console.info('authenticated by session, user:', username);
+
+      return userManager.getDisplay4Username(username, function(err, displayName) {
+	console.info('got display name', displayName);
+        return userManager.getAuthor4Username(username, function(err, authorId) {
+          console.info('retrieved authorId ' + authorId + ' for username ' + username);
+          context.req.session.auth_author = initializeAuthAuthorState(username, authorId, displayName);
+          return context.next();
+        });
+      });
+
     } else {
-      console.info("authenticating by oauth2");
+      console.info('authenticating by oauth2');
       return passport.authenticate('hbp')(context.req, context.res, context.next);
     }
   });
@@ -120,21 +137,45 @@ exports.authenticate = function(hook_name, context) {
 
 exports.handleMessage = function(hook_name, context, cb) {
   console.debug("oauth2.handleMessage");
-  if ( context.message.type == "CLIENT_READY" ) {
-    if (!context.message.token) {
-      console.debug('oauth2.handleMessage: intercepted CLIENT_READY message has no token!');
-    } else {
-      var client_id = context.client.id;
-      if ('user' in context.client.client.request.session) {
-        var displayName = context.client.client.request.session.user[usernameKey];
-        console.debug('oauth2.handleMessage: intercepted CLIENT_READY message for client_id = %s, setting username for token %s to %s', client_id, context.message.token, displayName);
-        setUsername(context.message.token, displayName);
-      }
-      else {
-        console.debug('oauth2.handleMessage: intercepted CLIENT_READY but user does have displayName !');
-      }
+
+  if( context.message.type === "CLIENT_READY" && context.client.request.session.auth_author ) {
+    var req = context.client.request;
+	
+    if( req.session.auth_author.id
+        && context.message.token
+        && req.session.auth_author.state === 'INIT'
+        && req.session.auth_author.shouldOverrideClient === true ) {
+      // If session.auth_author.id is not null, and token is supplied, update database to
+      // assign the token to the existing authorId
+      userManager.setToken4Author(context.message.token, req.session.auth_author.id);
+      console.info('Set token ' + context.message.token + ' for author ' + req.session.auth_author.id);
+      req.session.auth_author.state = 'COMPLETE';
+      return( cb([context.message]) );
     }
-  } else if ( context.message.type == "COLLABROOM" && context.message.data.type == "USERINFO_UPDATE" ) {
+
+    if( context.message.token
+        && req.session.auth_author.state === 'INIT'
+        && req.session.auth_author.shouldOverrideClient === false ) {
+      // If token is supplied, create author so we can stuff in the default username
+      authorManager.getAuthor4Token(context.message.token, function(err, authorId) {
+        if( authorId ) {
+          req.session.auth_author.id = authorId;
+	  userManager.setAuthor4Username(authorId, req.session.auth_author.username);
+	  console.info('Set author ' + authorId + ' for user ' +  req.session.auth_author.username);
+	  req.session.auth_author.state = 'COMPLETE';
+	  authorManager.setAuthorName(authorId, req.session.auth_author.authorName, function(){			    
+	    console.info('Set AuthorName to default value of ' + req.session.auth_author.authorName + ' for author ' + authorId);
+	    return( cb([context.message]) );
+          });		    
+        } else {
+          return( cb([context.message]) );
+        }
+      });
+      return;
+    }
+  }
+
+  if ( context.message.type == "COLLABROOM" && context.message.data.type == "USERINFO_UPDATE" ) {
     console.debug('oauth2.handleMessage: intercepted USERINFO_UPDATE and dropping it!');
     return cb([null]);
   }
