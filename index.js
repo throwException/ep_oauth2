@@ -40,12 +40,9 @@ function initializeAuthAuthorState(username, authorId, authorName) {
 }
 
 function setUsername(token, username) {
-  console.debug('oauth2.setUsername: getting authorid for token %s', token);
   authorManager.getAuthor4Token(token, function(err, author) {
     if (ERR(err)) {
-      console.debug('oauth2.setUsername: could not get authorid for token %s', token);
     } else {
-      console.debug('oauth2.setUsername: have authorid %s, setting username to "%s"', author, username);
       authorManager.setAuthorName(author, username);
     }
   });
@@ -82,9 +79,7 @@ exports.expressConfigure = function(hook_name, context) {
 
       var username = data[idKey]
       var displayName = data[usernameKey];
-      console.info('setting', username, displayName);
       userManager.setDisplay4Username(displayName, username);
-      console.info('setting done');
       cb(null, data);
     });
   }));
@@ -110,33 +105,32 @@ exports.expressCreateServer = function (hook_name, context) {
   });
 }
 
-exports.authenticate = function(hook_name, context) {
+exports.authenticate = function(hook_name, context, cb) {
   if (context.req.url.indexOf('/auth/') === 0) return context.next();
-  console.info('oauth2-authenticate from ->', context.req.url);
   context.req.session.afterAuthUrl = context.req.url;
   return passport.authenticate('session')(context.req, context.res, function(req, res) {
     if (context.req.session.user) {
-      var username = context.req.session.user[idKey];
-      console.info('authenticated by session, user:', username);
+      context.username = context.req.session.user[idKey];
+      console.info('authenticated user ' + context.username + ' url ' + context.req.url + ' by session');
 
-      return userManager.getDisplay4Username(username, function(err, displayName) {
-	console.info('got display name', displayName);
-        return userManager.getAuthor4Username(username, function(err, authorId) {
-          console.info('retrieved authorId ' + authorId + ' for username ' + username);
-          context.req.session.auth_author = initializeAuthAuthorState(username, authorId, displayName);
-          return context.next();
+      return userManager.getDisplay4Username(context.username, function(err, displayName) {
+        return userManager.getAuthor4Username(context.username, function(err, authorId) {
+          context.req.session.auth_author = initializeAuthAuthorState(context.username, authorId, displayName);
+          return cb([true]);
         });
       });
 
     } else {
-      console.info('authenticating by oauth2');
-      return passport.authenticate('hbp')(context.req, context.res, context.next);
+      return passport.authenticate('hbp')(context.req, context.res, function(req, res) {
+        context.username = context.req.session.user[idKey];
+        console.info('authenticated user ' + context.username + ' url ' + context.req.url + ' by oauth2');
+        return cb([true]);
+      });
     }
   });
 }
 
 exports.handleMessage = function(hook_name, context, cb) {
-  console.debug("oauth2.handleMessage");
 
   if( context.message.type === "CLIENT_READY" && context.client.request.session.auth_author ) {
     var req = context.client.request;
