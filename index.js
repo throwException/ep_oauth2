@@ -3,6 +3,7 @@ var settings = require('ep_etherpad-lite/node/utils/Settings');
 var authorManager = require('ep_etherpad-lite/node/db/AuthorManager');
 var userManager = require('./UserManager');
 var request = require('request');
+var db = require('ep_etherpad-lite/node/db/DB').db;
 
 // var settings = require('ep_etherpad-lite/node/utils/Settings').ep_oauth2;
 var passport = require('passport');
@@ -39,16 +40,6 @@ function initializeAuthAuthorState(username, authorId, authorName) {
   }   
 }
 
-function setUsername(token, username) {
-  authorManager.getAuthor4Token(token, function(err, author) {
-    if (ERR(err)) {
-    } else {
-      authorManager.setAuthorName(author, username);
-    }
-  });
-  return;
-}
-
 exports.expressConfigure = function(hook_name, context) {
   console.log('oauth2-expressConfigure');
   passport.use('hbp', new OAuth2Strategy({
@@ -76,16 +67,24 @@ exports.expressConfigure = function(hook_name, context) {
         accessToken: accessToken,
         refreshToken: refreshToken
       };
-
-      var username = data[idKey]
-      var displayName = data[usernameKey];
-      userManager.setDisplay4Username(displayName, username);
       cb(null, data);
     });
   }));
   var app = context.app;
   app.use(passport.initialize());
   app.use(passport.session());
+}
+
+function updateUser(session, callback) {
+  return userManager.getAuthor4Username(session.user.username, function(err, authorId) {
+    session.auth_author = initializeAuthAuthorState(session.user.username, authorId, session.user.displayname);
+    return db.get("userColor:"+session.user.username, function(err, value){
+      if (value) {
+        authorManager.setAuthorColorId(authorId, value);
+      }
+      callback();
+    });
+  });
 }
 
 exports.expressCreateServer = function (hook_name, context) {
@@ -95,7 +94,9 @@ exports.expressCreateServer = function (hook_name, context) {
     failureRedirect: '/auth/failure'
   }), function(req, res) {
     req.session.user = req.user;
-    res.redirect(req.session.afterAuthUrl);
+    return updateUser(req.session, function() {
+      res.redirect(req.session.afterAuthUrl);
+    });
   });
   app.get('/auth/failure', function(req, res) {
     res.send("<em>Authentication Failed</em>")
@@ -110,21 +111,16 @@ exports.authenticate = function(hook_name, context, cb) {
   context.req.session.afterAuthUrl = context.req.url;
   return passport.authenticate('session')(context.req, context.res, function(req, res) {
     if (context.req.session.user) {
-      context.username = context.req.session.user[idKey];
-      console.info('authenticated user ' + context.username + ' url ' + context.req.url + ' by session');
-
-      return userManager.getDisplay4Username(context.username, function(err, displayName) {
-        return userManager.getAuthor4Username(context.username, function(err, authorId) {
-          context.req.session.auth_author = initializeAuthAuthorState(context.username, authorId, displayName);
-          return cb([true]);
-        });
+      console.info('authenticated user ' + context.req.session.user.username + ' url ' + context.req.url + ' by session');
+      return updateUser(req.session, function() {
+        return cb([true]);
       });
-
     } else {
       return passport.authenticate('hbp')(context.req, context.res, function(req, res) {
-        context.username = context.req.session.user[idKey];
-        console.info('authenticated user ' + context.username + ' url ' + context.req.url + ' by oauth2');
-        return cb([true]);
+        console.info('authenticated user ' + context.req.session.user.username + ' url ' + context.req.url + ' by oauth2');
+        return updateUser(req.session, function() {
+          return cb([true]);
+        });
       });
     }
   });
@@ -167,11 +163,12 @@ exports.handleMessage = function(hook_name, context, cb) {
       });
       return;
     }
+  } else if ( context.message.type == "COLLABROOM" && context.message.data.type == "USERINFO_UPDATE" ) {
+    var req = context.client.request;
+    context.message.data.userInfo.name = req.session.user.displayname
+    db.set("userColor:"+req.session.user.username, context.message.data.userInfo.colorId);
+    return cb([context.message]);
+  } else {
+    return cb([context.message]);
   }
-
-  if ( context.message.type == "COLLABROOM" && context.message.data.type == "USERINFO_UPDATE" ) {
-    console.debug('oauth2.handleMessage: intercepted USERINFO_UPDATE and dropping it!');
-    return cb([null]);
-  }
-  return cb([context.message]);
 };
